@@ -1,0 +1,17 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    - cron: "18 */10 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit app
+        continue-on-error: true
+        run: |
+          echo "Pinging Sindh_HC..."
+          curl -s -L --max-redirs 20 -o /dev/null "https://nih-dashboard.streamlit.app/" || true
+          echo "Ping attempt finished (redirect behavior is normal for Streamlit apps)."
