@@ -18,14 +18,22 @@ Usage
     python update_data.py --backfill-reporting  # also fill reporting.parquet for old weeks
                                                 #   that are in core.parquet but not in reporting
     python update_data.py --accept-mismatch     # save a week even if its totals do not add up
+    python update_data.py --retry-skipped       # retry weeks that were quarantined earlier
+    python update_data.py --strict-exit         # exit with code 1 if any week was skipped
+
+Weeks that cannot be read (layout change, totals that do not add up, ...) are written to
+data/skipped_weeks.json with the reason and are NOT retried for RETRY_AFTER_DAYS days, so one
+bad bulletin no longer makes every daily run slow and red.  They are reported as a warning.
 """
 import argparse
 import io
+import json
 import os
 import re
 import shutil
 import sys
 import time
+from datetime import date
 from collections import Counter
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -37,6 +45,8 @@ from bs4 import BeautifulSoup
 
 PAGE_URL = "https://www.nih.org.pk/phb/weekly-bulletin"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IDSR-bulletin-bot/1.0)"}
+RETRY_AFTER_DAYS = 7          # a quarantined week is tried again after this many days
+SKIP_FILE = "skipped_weeks.json"
 TITLE_RE = re.compile(r"Week\s*(\d+)\s*Bulletin\s*\((\d{4})\)", re.I)
 
 # ----------------------------------------------------------------------------
@@ -459,6 +469,45 @@ def build_core_frame(rows, like):
     return df.astype({c: like[c].dtype for c in like.columns if c != "Date"}, errors="ignore")
 
 
+
+# ----------------------------------------------------------------------------
+# Quarantine list of weeks that could not be read
+# ----------------------------------------------------------------------------
+def load_skipped(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_skipped(path, data):
+    p = Path(path)
+    if data:
+        p.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    elif p.exists():
+        p.unlink()
+
+
+def is_quarantined(info):
+    try:
+        age = (date.today() - date.fromisoformat(info["last_try"])).days
+    except (KeyError, ValueError, TypeError):
+        return False
+    return age < RETRY_AFTER_DAYS
+
+
+def report_failures(failed):
+    """Visible on the GitHub run page without turning the whole run red."""
+    lines = [f"{y}-W{w:02d}: {why}" for y, w, why in failed]
+    for l in lines:
+        print(f"::warning title=IDSR week skipped::{l[:400]}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("### Weeks skipped by update_data.py\n\n")
+            f.write("\n".join(f"- `{l}`" for l in lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="data")
@@ -466,10 +515,16 @@ def main():
     ap.add_argument("--only", help="process just this week, e.g. 2025-52")
     ap.add_argument("--backfill-reporting", action="store_true")
     ap.add_argument("--accept-mismatch", action="store_true")
+    ap.add_argument("--retry-skipped", action="store_true",
+                    help="retry weeks in skipped_weeks.json even if tried recently")
+    ap.add_argument("--strict-exit", action="store_true",
+                    help="exit with code 1 if any week was skipped")
     args = ap.parse_args()
 
     core_p = Path(args.data_dir) / "core.parquet"
     rep_p = Path(args.data_dir) / "reporting.parquet"
+    skip_p = Path(args.data_dir) / SKIP_FILE
+    skipped = load_skipped(skip_p)
     core = pd.read_parquet(core_p)
     rep = pd.read_parquet(rep_p)
     core_weeks = set(zip(core.Year.astype(int), core.Week.astype(int)))
@@ -484,6 +539,12 @@ def main():
     if args.only:
         y, w = map(int, args.only.split("-"))
         todo = [(y, w)] if (y, w) in links else []
+    elif not args.retry_skipped:
+        held = [k for k in todo if is_quarantined(skipped.get(f"{k[0]}-{k[1]}", {}))]
+        if held:
+            print(f"{len(held)} earlier-failed week(s) not retried yet (retry after {RETRY_AFTER_DAYS} days): "
+                  + ", ".join(f"{y}-W{w:02d}" for y, w in held))
+        todo = [k for k in todo if k not in held]
     if not todo:
         print("No data found")
         return
@@ -509,6 +570,7 @@ def main():
             failed.append((y, w, repr(e)))
             print(f"  {y}-W{w:02d}: FAILED - {e!r}")
             continue
+        skipped.pop(f"{y}-{w}", None)                    # read fine this time: release from quarantine
         add_core = (y, w) not in core_weeks
         add_rep = (y, w) not in rep_weeks and bool(r_rows)
         if add_core:
@@ -520,6 +582,12 @@ def main():
         for x in warns:
             print(f"      warning: {x}")
         time.sleep(1)
+
+    today = date.today().isoformat()
+    for y, w, why in failed:
+        old = skipped.get(f"{y}-{w}", {})
+        skipped[f"{y}-{w}"] = {"reason": why[:500], "last_try": today, "tries": old.get("tries", 0) + 1}
+    save_skipped(skip_p, skipped)
 
     if new_core:
         add = build_core_frame(new_core, core)
@@ -538,7 +606,9 @@ def main():
     print(f"Done: {len({(r['Year'], r['Week']) for r in new_core})} week(s) added to core.parquet, "
           f"{len({(r['Year'], r['Week']) for r in new_rep})} to reporting.parquet, {len(failed)} skipped.")
     if failed:
-        sys.exit(1)
+        report_failures(failed)
+        if args.strict_exit:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
