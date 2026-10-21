@@ -14,9 +14,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests beautifulsoup4 pdfplumber pandas pyarrow
-      - run: python update_data.py          # PDFs are read in memory, never saved
+      - name: Update data (PDFs are read in memory, never saved)
+        id: update
+        continue-on-error: true          # a skipped week must not throw away the weeks that worked
+        run: python update_data.py
       - name: Save updated data files
         run: |
           git config user.name "bot"; git config user.email "bot@users.noreply.github.com"
           git add data/core.parquet data/reporting.parquet
           git diff --cached --quiet || (git commit -m "Add new IDSR bulletin data" && git push)
+      - name: Flag skipped weeks
+        if: steps.update.outcome == 'failure'
+        run: |
+          echo "Some weeks were skipped - open the 'Update data' step above to see which and why."
+          exit 1
