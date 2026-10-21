@@ -17,7 +17,7 @@ Usage
     python update_data.py --only 2025-52        # process one week only
     python update_data.py --backfill-reporting  # also fill reporting.parquet for old weeks
                                                 #   that are in core.parquet but not in reporting
-    python update_data.py --accept-mismatch     # save a week even if its totals do not add up
+    python update_data.py --accept-mismatch     # LOCAL USE ONLY, never in the workflow: saves a week whose totals do not add up
     python update_data.py --retry-skipped       # retry weeks that were quarantined earlier
     python update_data.py --strict-exit         # exit with code 1 if any week was skipped
 
@@ -69,6 +69,9 @@ DISEASE_FULL = {
     "sari": "SARI (Severe Acute Respiratory Infection)",
     "tb": "TB (Tuberculosis)",
     "typhoid": "Typhoid",
+    "mumps": "Mumps",
+    "pertussis": "Pertussis",
+    "chikungunya": "Chikungunya",
     "vhbcd": "VH (Viral Hepatitis B, C & D)",
 }
 DISEASE_CATEGORY = {
@@ -508,6 +511,41 @@ def report_failures(failed):
             f.write("\n".join(f"- `{l}`" for l in lines) + "\n")
 
 
+RECENT_WEEKS = 8
+
+
+def _recent_counts(df, province_col="Province", dist_col="District"):
+    """{province: median number of districts per week over the last RECENT_WEEKS weeks in the file}"""
+    wk = df[["Year", "Week"]].drop_duplicates().sort_values(["Year", "Week"]).tail(RECENT_WEEKS)
+    sub = df.merge(wk, on=["Year", "Week"])
+    per = sub.groupby([province_col, "Year", "Week"])[dist_col].nunique().reset_index()
+    return per.groupby(province_col)[dist_col].median().to_dict()
+
+
+def hard_checks(core_rows, rep_rows, core, rep):
+    """Problems that can never be accepted, not even with --accept-mismatch: they mean the PDF was
+    read wrongly (garbled names, missing or invented districts), so saving would corrupt the data."""
+    problems = []
+    for label, rows in (("cases", core_rows), ("reporting", rep_rows)):
+        for n in sorted({r["District"] for r in rows}):
+            if "(cid:" in n or n[:1].islower() or len(n) < 3:
+                problems.append(f"{label}: garbled district name {n!r}")
+    for label, rows, ref_df in (("cases", core_rows, core), ("reporting", rep_rows, rep)):
+        if not rows:
+            continue
+        ref = _recent_counts(ref_df)
+        got = pd.DataFrame(rows).groupby("Province")["District"].nunique().to_dict()
+        for prov, n in got.items():
+            r = ref.get(prov)
+            if r and not (0.9 * r <= n <= 1.15 * r):
+                problems.append(f"{label}: {prov} has {n} districts, recent weeks have about {r:g}")
+        for prov, r in ref.items():
+            if label == "cases" and prov not in got:
+                problems.append(f"cases: {prov} is missing (recent weeks have about {r:g} districts)")
+    if problems:
+        raise ParseError("; ".join(problems[:6]) + (f" (+{len(problems)-6} more)" if len(problems) > 6 else ""))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="data")
@@ -562,6 +600,7 @@ def main():
                 raise ParseError("download is not a PDF")
             c_rows, r_rows, warns = parse_bulletin(content, y, w, known_core, known_rep,
                                                    strict=not args.accept_mismatch)
+            hard_checks(c_rows, r_rows, core, rep)
         except ParseError as e:
             failed.append((y, w, str(e)))
             print(f"  {y}-W{w:02d}: SKIPPED - {e}")
