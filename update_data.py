@@ -51,6 +51,8 @@ DISEASE_FULL = {
     "cl": "CL (Cutaneous Leishmaniasis)",
     "dengue": "Dengue",
     "dogbite": "Dog/Animal Bite (Rabies)",
+    "animaldogbite": "Dog/Animal Bite (Rabies)",     # newer bulletins (2026) write the heading this way
+    "animalbite": "Dog/Animal Bite (Rabies)",
     "ili": "ILI (Influenza-like Illness)",
     "malaria": "Malaria",
     "measles": "Measles",
