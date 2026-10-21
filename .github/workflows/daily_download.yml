@@ -3,11 +3,28 @@ on:
   schedule:
     - cron: "0 4 * * *"      # every day 04:00 UTC (09:00 Pakistan time)
   workflow_dispatch:          # lets you run it by hand from the Actions tab
+    inputs:
+      only:
+        description: "Process one week only, e.g. 2026-30 (leave empty for normal run)"
+        required: false
+        default: ""
+      retry_skipped:
+        description: "Retry weeks that were skipped earlier"
+        type: boolean
+        default: false
+      accept_mismatch:
+        description: "Save a week even if its totals do not add up"
+        type: boolean
+        default: false
 permissions:
   contents: write
+concurrency:
+  group: idsr-data-update
+  cancel-in-progress: false
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,16 +32,23 @@ jobs:
           python-version: "3.12"
       - run: pip install requests beautifulsoup4 pdfplumber pandas pyarrow
       - name: Update data (PDFs are read in memory, never saved)
-        id: update
-        continue-on-error: true          # a skipped week must not throw away the weeks that worked
-        run: python update_data.py
+        # Weeks that cannot be read are listed as warnings (see run summary) and written to
+        # data/skipped_weeks.json; they no longer make the whole run fail.
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.only }}" ]; then ARGS="$ARGS --only ${{ github.event.inputs.only }}"; fi
+          if [ "${{ github.event.inputs.retry_skipped }}" = "true" ]; then ARGS="$ARGS --retry-skipped"; fi
+          if [ "${{ github.event.inputs.accept_mismatch }}" = "true" ]; then ARGS="$ARGS --accept-mismatch"; fi
+          python update_data.py $ARGS
       - name: Save updated data files
         run: |
           git config user.name "bot"; git config user.email "bot@users.noreply.github.com"
           git add data/core.parquet data/reporting.parquet
-          git diff --cached --quiet || (git commit -m "Add new IDSR bulletin data" && git push)
-      - name: Flag skipped weeks
-        if: steps.update.outcome == 'failure'
-        run: |
-          echo "Some weeks were skipped - open the 'Update data' step above to see which and why."
-          exit 1
+          git add -A data/skipped_weeks.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Update IDSR bulletin data"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
