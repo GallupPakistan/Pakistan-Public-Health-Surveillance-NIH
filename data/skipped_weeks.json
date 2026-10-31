@@ -100,9 +100,9 @@
     "tries": 2
   },
   "2026-40": {
-    "last_try": "2026-10-24",
+    "last_try": "2026-10-31",
     "reason": "reporting: Gilgit-Baltistan has 2 districts, recent weeks have about 9; reporting: Islamabad Capital Territory has 41 districts, recent weeks have about 2",
-    "tries": 1
+    "tries": 2
   },
   "2026-41": {
     "last_try": "2026-10-28",
